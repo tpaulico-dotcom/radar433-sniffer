@@ -6,6 +6,15 @@ Un **sniffer et analyseur 433 MHz** DIY basé sur un ESP32 et un module CC1101, 
 
 ---
 
+## 📸 Captures d'écran
+
+**Thème DOS**
+![Interface DOS](docs/dos.png)
+
+**Thème Atari ST**
+![Interface Atari](docs/atari.png)
+
+---
 ## ✨ Fonctionnalités
 
 - **Réception + décodage** de ~328 protocoles via [rtl_433_ESP](https://github.com/.../rtl_433_ESP) (sonnettes EV1527, télécommandes, capteurs météo…)
