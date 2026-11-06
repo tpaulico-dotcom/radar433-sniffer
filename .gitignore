@@ -12,3 +12,4 @@ sauvegardes/
 *.bak
 Thumbs.db
 .DS_Store
+rtl433_esp/
