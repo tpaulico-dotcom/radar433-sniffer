@@ -1,0 +1,14 @@
+# Environnements / caches
+.venv/
+__pycache__/
+*.pyc
+*.log
+
+# Snapshots locaux (volumineux)
+sauvegardes/
+
+# Fichiers temporaires
+*.tmp
+*.bak
+Thumbs.db
+.DS_Store
