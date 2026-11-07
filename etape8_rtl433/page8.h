@@ -77,6 +77,9 @@ const char PAGE[] PROGMEM = R"rawliteral(
     .modal-box input,.modal-box textarea{width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:8px;font-family:inherit;font-size:12px;margin-bottom:8px;box-sizing:border-box}
     .modal-box textarea{min-height:110px;resize:vertical}
     .modal-btns{display:flex;gap:8px}
+    .bf-btn{background:#a00;color:#fff;border-color:#d00}
+    .imp-or{text-align:center;font-size:10px;color:var(--dim);margin:6px 0}
+    #imp-file{width:100%;font-size:11px;color:var(--text);margin-bottom:6px}
     .cat-head{font-size:11px;font-weight:bold;padding:5px 2px;margin:3px 0 4px;letter-spacing:1px;border-bottom:1px solid}
   .cat-item .mrk{font-style:normal;font-size:10px;opacity:.7}
   .cat-item{border:1px solid var(--border);background:var(--bg);padding:6px 8px;margin-bottom:5px;display:flex;justify-content:space-between;align-items:center;gap:8px}
@@ -167,10 +170,16 @@ const char PAGE[] PROGMEM = R"rawliteral(
 <div id="imp-modal" class="modal">
   <div class="modal-box">
     <div class="modal-title">IMPORTER UNE TRAME</div>
-    <input type="text" id="imp-nom" placeholder="nom de la trame">
-    <textarea id="imp-data" placeholder="colle : tableau C en µs, 0xHEX, ou binaire"></textarea>
+    <input type="text" id="imp-nom" placeholder="nom (auto = nom du fichier)">
+    <div class="imp-or">— fichier —</div>
+    <input type="file" id="imp-file" accept=".sub,.txt,.json,.ino,.c,.h">
+    <button class="dos-btn sm" onclick="importerFichier()">CHARGER CE FICHIER</button>
+    <button class="dos-btn sm bf-btn" onclick="bruteforce()">⚡ BRUTEFORCE</button>
+    <button class="dos-btn sm" onclick="bfStop=true">■ STOP</button>
+    <div class="imp-or">— ou coller —</div>
+    <textarea id="imp-data" placeholder="tableau C en µs, 0xHEX, binaire, ou .sub Flipper"></textarea>
     <div class="modal-btns">
-      <button class="dos-btn sm" onclick="importer()">AJOUTER</button>
+      <button class="dos-btn sm" onclick="importer()">AJOUTER (collé)</button>
       <button class="dos-btn sm" onclick="toggleImport()">FERMER</button>
     </div>
   </div>
@@ -254,8 +263,8 @@ function ligneEvt(e){
   const t=document.getElementById("stream");
   const d=document.createElement("div");d.className="evt";
   const strip=(e.d&&e.d.length)?'<div class="strip">'+dessiner(e.d)+'</div>':'';
-  const det=(e.model==="BRUT")?(e.id+" imp · "+e.cmd+" ms"):("id "+e.id+" · cmd "+e.cmd);
-  d.innerHTML='<div class="head"><button class="dos-btn sm rep" data-n="'+e.no+'">▶</button><span class="h">'+e.heure+'</span> <span class="m">'+e.model+'</span> <span class="d2">'+det+'</span> <span class="r">'+e.rssi+' dBm</span></div>'+strip;
+  const det=(e.model==="BRUT")?(e.id+" imp · "+e.cmd+" ms"):("id "+e.id+" · cmd "+e.cmd);const met=(e.model!=="BRUT"&&e.temp!==undefined&&e.temp>-900)?(" · "+e.temp.toFixed(1)+"°C"+(e.hum>=0?" "+e.hum+"%":"")):"";
+  d.innerHTML='<div class="head"><button class="dos-btn sm rep" data-n="'+e.no+'">▶</button><span class="h">'+e.heure+'</span> <span class="m">'+e.model+'</span> <span class="d2">'+(det+met)+'</span> <span class="r">'+e.rssi+' dBm</span></div>'+strip;
   d.title="Toucher = enregistrer · ▶ = rejouer";
   const b=d.querySelector(".rep");if(b){b.onclick=function(ev){ev.stopPropagation();b.textContent="…";fetch("/rejouer?no="+e.no).then(function(){toast("Rejoué");monLog("REJOUÉ "+(e.model||"?")+" "+e.id);setTimeout(function(){b.textContent="▶";},600);});};}
   d.onclick=function(){const n=prompt("Nommer cette capture :",e.model==="BRUT"?("brut "+e.id+"imp"):(e.model+" id "+e.id));if(n===null)return;const nom=n.trim()||(e.model+" "+e.id);fetch("/enregistrer?nom="+encodeURIComponent(nom)+"&no="+e.no).then(function(){toast("Enregistré : "+nom);monLog("SAUVÉ "+nom);charger();});};
@@ -318,7 +327,9 @@ async function charger(){
 }
 
 function toggleImport(){const m=document.getElementById("imp-modal");m.classList.toggle("open");if(m.classList.contains("open")){setTimeout(function(){document.getElementById("imp-data").focus();},60);}}
-function importer(){const nom=document.getElementById("imp-nom").value.trim()||("import "+(Date.now()%1000));const d=document.getElementById("imp-data").value;if(!d.trim())return;fetch("/importer?nom="+encodeURIComponent(nom)+"&data="+encodeURIComponent(d)).then(function(r){return r.json();}).then(function(j){if(j.ok){toast("Ajouté : "+nom);monLog("IMPORTÉ "+nom);document.getElementById("imp-data").value="";toggleImport();charger();}else{toast("Échec : "+(j.err||"invalide"));}});}
+function envoyerImport(nom,data){toast("Envoi "+data.length+" car…");fetch("/importer?nom="+encodeURIComponent(nom),{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"data="+encodeURIComponent(data)}).then(function(r){return r.text().then(function(t){return {s:r.status,t:t};});}).then(function(o){var j=null;try{j=JSON.parse(o.t);}catch(e){}if(j&&j.ok){toast("Ajouté : "+nom);monLog("IMPORTÉ "+nom);var d=document.getElementById("imp-data");if(d)d.value="";var f=document.getElementById("imp-file");if(f)f.value="";toggleImport();charger();}else{toast("HTTP "+o.s+" : "+((j&&j.err)?j.err:o.t.substring(0,55)));}}).catch(function(e){toast("Erreur réseau : "+e.message);});}
+function importerFichier(){try{var inp=document.getElementById("imp-file");var f=inp&&inp.files&&inp.files[0];if(!f){toast("Aucun fichier sélectionné");return;}toast("Fichier : "+f.name+" ("+Math.round(f.size/1024)+" Ko)");var nom=document.getElementById("imp-nom").value.trim()||f.name.replace(/\.[^.]+$/,"");var rd=new FileReader();rd.onerror=function(){toast("Erreur de lecture");};rd.onload=function(){envoyerImport(nom,rd.result);};rd.readAsText(f);}catch(e){toast("Erreur : "+e.message);}}
+function importer(){var nom=document.getElementById("imp-nom").value.trim()||("import "+(Date.now()%1000));var d=document.getElementById("imp-data").value;if(!d.trim())return;envoyerImport(nom,d);}
 
 let hexBuf=[];
 function appendHexLine(txt,yellow){const R=document.getElementById("mon-hex");if(!R)return;const d=document.createElement("div");d.className=yellow?"rec":"hex";d.textContent=txt;R.appendChild(d);while(R.children.length>400)R.removeChild(R.firstChild);R.scrollTop=R.scrollHeight;}
@@ -330,6 +341,10 @@ function feedMonitor(e){const rec=(e.model&&e.model!=="BRUT");if(!rec)return;app
 let loggedEvt={};
 function logEvent(e){if(loggedEvt[e.no])return;loggedEvt[e.no]=true;const rec=(e.model&&e.model!=="BRUT");const det=rec?(e.model+" id="+e.id+" cmd="+e.cmd+" "+e.rssi+"dBm"):("BRUT "+e.id+"imp "+e.rssi+"dBm");monLog((e.heure||"")+" REÇU "+det,rec);}
 function monLog(msg,rec){const L=document.getElementById("mon-logs");if(!L)return;const d=document.createElement("div");d.className=rec?"act":"rx";d.textContent=msg;L.appendChild(d);while(L.children.length>300)L.removeChild(L.firstChild);L.scrollTop=L.scrollHeight;}
+var bfStop=false;
+function bruteforce(){var inp=document.getElementById("imp-file");var f=inp&&inp.files&&inp.files[0];if(!f){toast("Choisis un .sub");return;}bfStop=false;var rd=new FileReader();rd.onload=function(){lancerBF(rd.result);};rd.onerror=function(){toast("Erreur lecture");};rd.readAsText(f);}
+function lancerBF(txt){var lines=txt.split(/\r?\n/);var frames=[];for(var i=0;i<lines.length;i++){if(lines[i].indexOf("RAW_Data")<0)continue;var nums=lines[i].match(/-?\d+/g)||[];var d=[];for(var k=0;k<nums.length;k++){var v=Math.abs(parseInt(nums[k]));if(v>0)d.push(v);}if(d.length>=4)frames.push(d);}if(!frames.length){toast("Aucune trame RAW");return;}var idx=0;monLog("BF "+frames.length+" trames",true);function step(){if(bfStop){toast("BF stop "+idx+"/"+frames.length);return;}if(idx>=frames.length){toast("BF fini "+frames.length);monLog("BF FINI",true);return;}var d=frames[idx].slice(0,200);fetch("/tx",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"data="+encodeURIComponent(d.join(" "))}).then(function(){idx++;if(idx===1||idx%25===0)toast("BF "+idx+"/"+frames.length);setTimeout(step,60);}).catch(function(){toast("Erreur BF");});}step();}
+function resetRx(){toast("Redémarrage RX…");fetch("/reset").then(function(){setTimeout(function(){location.reload();},3000);}).catch(function(){setTimeout(function(){location.reload();},3000);});}
 setInterval(tick,150);tick();charger();majCap();
 </script>
 </body></html>

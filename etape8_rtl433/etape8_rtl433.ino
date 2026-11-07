@@ -17,7 +17,7 @@
 #define PIN_DATA 4          // GDO0 (GPIO4) — data + rejeu
 #define PIN_CS   5
 
-const char* SSID         = "Radar433";
+const char* SSID         = "iPhone de Joe";
 const char* MOT_DE_PASSE = "";
 
 // ---- Événements décodés ----
@@ -28,6 +28,8 @@ struct Evenement {
   unsigned long devid;
   int cmd;
   int rssi;
+  float temp;
+  int hum;
   char heure[9];
   uint16_t d[200];
   int dn;
@@ -35,6 +37,7 @@ struct Evenement {
 Evenement evt[MAX_EVENTS];
 int nbEvt = 0;
 unsigned long numeroEvt = 0;
+unsigned long resetPending = 0;
 
 char dernierJson[512];
 unsigned long dernierT = 0;
@@ -102,6 +105,17 @@ void ccEcrit(uint8_t reg, uint8_t val) {
   digitalWrite(PIN_CS, HIGH);
   SPI.endTransaction();
 }
+uint8_t ccLire(uint8_t addr) {
+  SPI.beginTransaction(ccSpi);
+  digitalWrite(PIN_CS, LOW);
+  delayMicroseconds(2);
+  SPI.transfer((addr >= 0x30) ? (addr | 0xC0) : (addr | 0x80));   // 0xC0=statut burst, 0x80=lecture
+  uint8_t v = SPI.transfer(0);
+  digitalWrite(PIN_CS, HIGH);
+  SPI.endTransaction();
+  return v;
+}
+
 void ccCommande(uint8_t cmd) {
   SPI.beginTransaction(ccSpi);
   digitalWrite(PIN_CS, LOW);
@@ -113,18 +127,20 @@ void ccCommande(uint8_t cmd) {
 }
 
 // ---- Callbacks rtl_433_ESP ----
-void extraire(const char* j, char* modele, unsigned long* id, int* cmd, int* rssi) {
+void extraire(const char* j, char* modele, unsigned long* id, int* cmd, int* rssi, float* temp, int* hum) {
   const char* p = strstr(j, "\"model\":\"");
   if (p) { p += 9; int i = 0; while (*p && *p != '"' && i < 31) modele[i++] = *p++; modele[i] = 0; }
   else strcpy(modele, "?");
   p = strstr(j, "\"id\":");   *id   = p ? strtoul(p + 5, 0, 10) : 0;
   p = strstr(j, "\"cmd\":");  *cmd  = p ? atoi(p + 6) : 0;
   p = strstr(j, "\"rssi\":"); *rssi = p ? atoi(p + 7) : 0;
+  p = strstr(j, "\"temperature_C\":"); *temp = p ? atof(p + 16) : -999;
+  p = strstr(j, "\"humidity\":");      *hum  = p ? atoi(p + 11) : -1;
 }
 
 void onDecode(char* m) {
-  char modele[32]; unsigned long devid; int cmd, rssi;
-  extraire(m, modele, &devid, &cmd, &rssi);
+  char modele[32]; unsigned long devid; int cmd, rssi; float temp; int hum;
+  extraire(m, modele, &devid, &cmd, &rssi, &temp, &hum);
   char cle[48];
   snprintf(cle, sizeof(cle), "%s:%lu:%d", modele, devid, cmd);
   if (strcmp(cle, dernierJson) == 0 && (millis() - dernierT) < 1500) return;
@@ -135,7 +151,7 @@ void onDecode(char* m) {
   if (!captureActive) return;
 
   Evenement e; e.no = ++numeroEvt;
-  strcpy(e.modele, modele); e.devid = devid; e.cmd = cmd; e.rssi = rssi;
+  strcpy(e.modele, modele); e.devid = devid; e.cmd = cmd; e.rssi = rssi; e.temp = temp; e.hum = hum;
   unsigned long now = millis();
   snprintf(e.heure, 9, "%02lu:%02lu:%02lu", (now / 3600000UL) % 24, (now / 60000UL) % 60, (now / 1000UL) % 60);
   e.dn = derniereNb < 200 ? derniereNb : 200;
@@ -144,6 +160,27 @@ void onDecode(char* m) {
   if (nbEvt < MAX_EVENTS) nbEvt++;
   for (int i = nbEvt - 1; i > 0; i--) evt[i] = evt[i - 1];
   evt[0] = e;
+}
+
+// ---- Décodeur CAME 12 bits (validé sur les 4096 codes) ----
+bool decodeCAME(const uint16_t* s, int n, unsigned int& code) {
+  for (int si = 0; si < n - 26; si++) {
+    if (s[si] < 8000 || s[si] > 16000) continue;      // sync ~11520
+    for (int d = 1; d <= 2; d++) {
+      int base = si + d;
+      if (base + 24 >= n) continue;
+      if (s[base] < 200 || s[base] > 480) continue;   // start ~320
+      unsigned int c = 0; bool ok = true;
+      for (int k = 1; k <= 12; k++) {
+        uint16_t h = s[base + 2 * k];
+        if (h >= 200 && h <= 480) c = (c << 1) | 1;   // 320 = 1
+        else if (h >= 520 && h <= 820) c = (c << 1);  // 640 = 0
+        else { ok = false; break; }
+      }
+      if (ok) { code = c; return true; }
+    }
+  }
+  return false;
 }
 
 void onRaw(const int* p, const int* g, unsigned int n, unsigned long d, int r) {
@@ -157,16 +194,40 @@ void onRaw(const int* p, const int* g, unsigned int n, unsigned long d, int r) {
   brutD = d; brutR = r;
   brutT = millis();
   brutPret = true;   // signale au loop (cœur 0) qu'un brut est prêt
+  // ---- décodage CAME custom (en plus du brut) ----
+  {
+    unsigned int camCode;
+    if (decodeCAME(derniereSeq, derniereNb, camCode)) {
+      char cle[32]; snprintf(cle, sizeof(cle), "CAME:%u:0", camCode);
+      if (!(strcmp(cle, dernierJson) == 0 && (millis() - dernierT) < 1500)) {
+        strncpy(dernierJson, cle, sizeof(dernierJson) - 1); dernierJson[sizeof(dernierJson) - 1] = 0;
+        dernierT = millis();
+        nbDecode++;
+        if (captureActive) {
+          Evenement e; e.no = ++numeroEvt;
+          strcpy(e.modele, "CAME"); e.devid = camCode; e.cmd = 0; e.rssi = r; e.temp = -999; e.hum = -1;
+          unsigned long now = millis();
+          snprintf(e.heure, 9, "%02lu:%02lu:%02lu", (now / 3600000UL) % 24, (now / 60000UL) % 60, (now / 1000UL) % 60);
+          e.dn = derniereNb < 200 ? derniereNb : 200;
+          for (int k = 0; k < e.dn; k++) e.d[k] = derniereSeq[k];
+          if (nbEvt < MAX_EVENTS) nbEvt++;
+          for (int z = nbEvt - 1; z > 0; z--) evt[z] = evt[z - 1];
+          evt[0] = e;
+        }
+      }
+    }
+  }
+
 }
 // ---- Rejeu TX ----
 void envoyerSequence(const uint16_t* seq, int n) {
   if (n <= 0) return;
+  Serial.printf("[TX] start n=%d\n", n);
   rf.disableReceiver();
-  if (!rtl_433_ESP::spiTake(300)) { rf.enableReceiver(); return; }
-  ccEcrit(0x08, 0x32);   // PKTCTRL0 = asynchrone
-  ccEcrit(0x02, 0x2D);   // IOCFG0 = GDO0 en entrée data TX
-  ccCommande(0x36);      // SIDLE
-  ccCommande(0x35);      // STX
+  if (!rtl_433_ESP::spiTake(300)) { Serial.println("[TX] spiTake FAIL"); rf.enableReceiver(); return; }
+  rf.setCC1101Register(0x08, 0x32);   // PKTCTRL0 = asynchrone
+  rf.setCC1101Register(0x02, 0x2D);   // IOCFG0 = GDO0 entree data TX
+  ccCommande(0x35);                   // STX
   pinMode(PIN_DATA, OUTPUT);
   for (int rep = 0; rep < 3; rep++) {
     for (int i = 0; i < n; i++) {
@@ -175,17 +236,16 @@ void envoyerSequence(const uint16_t* seq, int n) {
     }
     digitalWrite(PIN_DATA, LOW);
     delay(20);
+    yield();
   }
   pinMode(PIN_DATA, INPUT);
-  ccCommande(0x36);      // SIDLE : arrête TX
-  delay(5);               // laisse le CC1101 repasser en IDLE
-  ccEcrit(0x02, 0x0D);   // IOCFG0 = GDO0 sortie données RX (0x0D)
-  ccEcrit(0x08, 0x32);   // PKTCTRL0 = 0x32 (asynchrone + longueur infinie)
-  ccCommande(0x3A);      // SFRX : vide le FIFO RX
-  ccCommande(0x34);      // SRX : repasse en réception
-  delay(10);              // calibration RX
+  ccCommande(0x36);                   // SIDLE
   rtl_433_ESP::spiGive();
+  // === RE-INIT COMPLETE du CC1101 (restaure le RX proprement) ===
+  rf.end();
+  rf.initReceiver(PIN_DATA, 433.92);
   rf.enableReceiver();
+  Serial.println("[TX] end (reinit)");
 }
 
 // ---- Routes ----
@@ -205,7 +265,7 @@ void gererData() {
          ",\"model\":\"" + String(evt[i].modele) + "\"" +
          ",\"id\":" + String(evt[i].devid) +
          ",\"cmd\":" + String(evt[i].cmd) +
-         ",\"rssi\":" + String(evt[i].rssi) +
+         ",\"rssi\":" + String(evt[i].rssi) + ",\"temp\":" + String(evt[i].temp, 1) + ",\"hum\":" + String(evt[i].hum) +
          ",\"heure\":\"" + String(evt[i].heure) + "\"" +
          ",\"d\":[";
     int dn2 = evt[i].dn < 50 ? evt[i].dn : 50;
@@ -289,7 +349,8 @@ void gererEnregistrer() {
 
 void gererManuel() {
   String fmt = serveur.arg("fmt");
-  String data = serveur.arg("data");
+  String data = serveur.arg("plain");
+  if (data.length() == 0) data = serveur.arg("data");
   uint16_t seq[400];
   int n = 0;
   if (fmt == "bin") {
@@ -404,6 +465,23 @@ int ev1527FromBits(const char* bits, int nb, uint16_t* seq) {
   return n;
 }
 
+// ---- Bruteforce : TX d'une trame brute reçue du client (POST) ----
+void gererTx() {
+  String data = serveur.arg("plain");
+  if (data.length() == 0) data = serveur.arg("data");
+  uint16_t seq[200]; int n = 0; int i = 0;
+  while (i < (int)data.length() && n < 200) {
+    while (i < (int)data.length() && !isdigit((unsigned char)data.charAt(i))) i++;
+    if (i >= (int)data.length()) break;
+    long v = 0;
+    while (i < (int)data.length() && isdigit((unsigned char)data.charAt(i))) { v = v * 10 + (data.charAt(i) - '0'); i++; }
+    if (v > 0 && v < 65536) seq[n++] = (uint16_t)v;
+  }
+  if (n < 2) { serveur.send(200, "application/json", "{\"ok\":false,\"err\":\"vide\"}"); return; }
+  envoyerSequence(seq, n);
+  serveur.send(200, "application/json", "{\"ok\":true,\"n\":" + String(n) + "}");
+}
+
 void gererImporter() {
   String nom = serveur.arg("nom"); if (nom.length() == 0) nom = "import"; if (nom.length() > 27) nom = nom.substring(0, 27);
   String data = serveur.arg("data");
@@ -510,7 +588,14 @@ void setup() {
   serveur.on("/capture", gererCapture);
   serveur.on("/manuel", gererManuel);
   serveur.on("/fiche", gererFiche);
-  serveur.on("/importer", gererImporter);
+  serveur.on("/reset", []() {
+    serveur.send(200, "text/plain", "reboot");
+    resetPending = millis();
+  });
+  serveur.on("/tx", HTTP_POST, gererTx);
+  serveur.on("/tx", HTTP_GET, gererTx);
+  serveur.on("/importer", HTTP_GET, gererImporter);
+  serveur.on("/importer", HTTP_POST, gererImporter);
   serveur.on("/logo", servir_logo_raus);
   serveur.on("/slca", servir_logo_slca);
   serveur.on("/logo2", servir_logo_atari);
@@ -522,6 +607,8 @@ void setup() {
 
 void loop() {
   rf.loop();
+
+  if (resetPending && millis() - resetPending > 400) ESP.restart();
 
   // Création différée du bloc BRUT (sur ce cœur 0, pour éviter la course de données)
   if (brutPret) {
@@ -536,7 +623,7 @@ void loop() {
       strcpy(e.modele, "BRUT");
       e.devid = derniereNb / 2;
       e.cmd = (int)(brutD / 1000);
-      e.rssi = brutR;
+      e.rssi = brutR; e.temp = -999; e.hum = -1;
       unsigned long now = millis();
       snprintf(e.heure, 9, "%02lu:%02lu:%02lu", (now / 3600000UL) % 24, (now / 60000UL) % 60, (now / 1000UL) % 60);
       e.dn = derniereNb < 200 ? derniereNb : 200;
@@ -563,7 +650,7 @@ void loop() {
   static unsigned long tHb = 0;
   if (millis() - tHb >= 2000) {
     tHb = millis();
-    Serial.printf("[HB] derniereNb=%d rssi=%d capture=%s brut=%d dec=%d\n", derniereNb, rssiActuel, captureActive ? "ON" : "OFF", nbBrut, nbDecode);
+        Serial.printf("[HB] derniereNb=%d rssi=%d capture=%s brut=%d dec=%d\n", derniereNb, rssiActuel, captureActive ? "ON" : "OFF", nbBrut, nbDecode);
   }
   serveur.handleClient();
 }
